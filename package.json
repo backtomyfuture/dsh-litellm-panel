@@ -1,0 +1,53 @@
+{
+  "name": "dsh-resource-center",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness sidebar for LiteLLM models, MCP servers, skills, and spend.",
+  "license": "MIT",
+  "author": "backtomyfuture",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/backtomyfuture/dsh-resource-center.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "files": [
+    "lib",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node --check lib/index.js && node --check lib/client.js && node --check lib/routes.js && node --check lib/store.js && node --check lib/litellm.js && node --check lib/mcp.js && node --check lib/skills.js && node --check lib/spend.js && node --check lib/loopback.js",
+    "test": "npm run check && node --test"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "litellm"
+  ]
+}

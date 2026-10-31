@@ -1,0 +1,4 @@
+# Mount the host row. The browser half is discovered from dsh.client.
+- insert:
+    - id: dsh-resource-center
+      name: dsh-resource-center
