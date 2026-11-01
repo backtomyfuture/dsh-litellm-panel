@@ -28,7 +28,7 @@ DeepSeek Harness 侧边栏里的资源与工具中心。网关、模型和技能
 先完全退出 DeepSeek Harness，再装进 desktop profile：
 
 ```sh
-"/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" plugin --profile desktop add /Users/jarod/Documents/LiteLLM/dsh-resource-center
+dsh plugin --profile desktop add dsh-resource-center
 ```
 
 `dsh web` 把 `desktop` 换成 `web`。重新打开后，侧边栏出现「LiteLLM资源中心」。
