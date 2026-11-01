@@ -6,7 +6,7 @@
   "author": "backtomyfuture",
   "repository": {
     "type": "git",
-    "url": "https://github.com/backtomyfuture/dsh-resource-center.git"
+    "url": "git+https://github.com/backtomyfuture/dsh-resource-center.git"
   },
   "type": "module",
   "engines": {
