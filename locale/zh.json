@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "LiteLLM资源中心",
-    "description": "在侧边栏同步 LiteLLM 模型、热启停 MCP，并安装或开关 Skill。"
+    "description": "在侧边栏连接 LiteLLM，并用开关安装 MCP 和 Skill。"
   }
 }
