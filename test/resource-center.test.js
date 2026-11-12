@@ -32,7 +32,7 @@ import {
 } from '../lib/mcp.js'
 import { inject } from '../lib/index.js'
 import { handle } from '../lib/routes.js'
-import { applyUpdate, compareVersions, findProfile, releaseStatus } from '../lib/release.js'
+import { applyUpdate, assertTarballEntries, compareVersions, fetchRelease, findProfile, releaseStatus, rewriteDependency, rewritePanelLock } from '../lib/release.js'
 import {
   assertCanInstall,
   dshSkillIssue,
@@ -730,6 +730,7 @@ test('client registers the sidebar page', () => {
   assert.equal(code.includes('本机已有'), true)
   assert.equal(code.includes("tab === 'models' || tab === 'mcp' || tab === 'skills'"), true)
   assert.equal(code.includes('从这里安装的技能也已移出'), true)
+  assert.equal(code.includes('registry.npmmirror.com'), true)
   assert.equal(code.includes('~/.agents/skills'), true)
   assert.equal(code.includes('正在'), true)
 })
@@ -1012,6 +1013,91 @@ test('release status compares npm and only updates an installed profile', async 
   assert.equal(posted.status, 200)
   assert.deepEqual(ran, ['desktop@0.9.0'])
   assert.equal(JSON.parse(posted.body).installed, '0.9.0')
+})
+
+test('update downloads this package from npm and falls back to the china mirror', async () => {
+  const seen = []
+  const release = await fetchRelease(async (url) => {
+    seen.push(String(url))
+    if (String(url).startsWith('https://registry.npmjs.org/')) throw new Error('network')
+    return jsonResponse(200, { version: '0.2.4' })
+  })
+  assert.equal(release.version, '0.2.4')
+  assert.equal(release.registry, 'https://registry.npmmirror.com')
+  assert.equal(seen.length, 2)
+  assert.throws(() => assertTarballEntries('package/../evil'), /不允许的路径/)
+  assert.equal(rewriteDependency('{\n  "dependencies": {\n    "dsh-litellm-panel": "0.2.2",\n    "other": "file:/missing.tgz"\n  }\n}', '0.9.0').includes('"other": "file:/missing.tgz"'), true)
+
+  const home = await mkdtemp(path.join(tmpdir(), 'dsh-upd-'))
+  const profile = path.join(home, 'profiles', 'desktop')
+  await mkdir(profile, { recursive: true })
+  const lock = [
+    "lockfileVersion: '9.0'",
+    '',
+    'importers:',
+    '',
+    '  .:',
+    '    dependencies:',
+    '      dsh-litellm-panel:',
+    '        specifier: 0.2.2',
+    '        version: 0.2.2',
+    '      other:',
+    '        specifier: file:/missing.tgz',
+    '        version: file:../missing.tgz',
+    '',
+    'packages:',
+    '',
+    '  dsh-litellm-panel@0.2.2:',
+    '    resolution: {integrity: sha512-aaaaaaaa, }',
+    '    engines: {node: \'>=20\'}',
+    '',
+    'snapshots:',
+    '',
+    '  dsh-litellm-panel@0.2.2: {}',
+    '',
+  ].join('\n')
+  assert.match(rewritePanelLock(lock, '0.9.0', 'sha512-bbbbbbbb'), /dsh-litellm-panel@0.9.0:/)
+  await writeFile(path.join(profile, 'package.json'), '{\n  "dependencies": {\n    "dsh-litellm-panel": "0.2.2",\n    "other": "file:/missing.tgz"\n  }\n}')
+  await writeFile(path.join(profile, 'pnpm-lock.yaml'), lock)
+  const packed = path.join(home, 'package')
+  await mkdir(packed, { recursive: true })
+  await writeFile(path.join(packed, 'package.json'), JSON.stringify({ name: 'dsh-litellm-panel', version: '0.9.0' }))
+  const tarball = path.join(home, 'panel.tgz')
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  await promisify(execFile)('tar', ['-czf', tarball, '-C', home, 'package'])
+  const bytes = await readFile(tarball)
+  const integrity = `sha512-${createHash('sha512').update(bytes).digest('base64')}`
+  const moduleUrl = pathToFileURL(path.join(profile, 'node_modules', 'dsh-litellm-panel', 'lib', 'release.js'))
+  const updated = await applyUpdate({
+    current: '0.2.2',
+    moduleUrl,
+    fetch: async (url) => {
+      const target = String(url)
+      if (target.endsWith('/latest')) return jsonResponse(200, { version: '0.9.0' })
+      if (target.endsWith('/0.9.0')) return jsonResponse(200, { version: '0.9.0', dist: { integrity } })
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+        json: async () => { throw new Error('not json') },
+        text: async () => '',
+      }
+    },
+  })
+  assert.equal(updated.installed, '0.9.0')
+  assert.equal(updated.registry, 'https://registry.npmjs.org')
+  const installed = JSON.parse(await readFile(path.join(profile, 'node_modules', 'dsh-litellm-panel', 'package.json'), 'utf8'))
+  assert.equal(installed.version, '0.9.0')
+  const manifest = await readFile(path.join(profile, 'package.json'), 'utf8')
+  assert.match(manifest, /"dsh-litellm-panel": "0.9.0"/)
+  assert.match(manifest, /file:\/missing\.tgz/)
+  const written = await readFile(path.join(profile, 'pnpm-lock.yaml'), 'utf8')
+  assert.match(written, new RegExp(`integrity: ${integrity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+  assert.match(written, /file:\/missing\.tgz/)
+  assert.equal(written.includes('dsh-litellm-panel@0.2.2'), false)
+  await rm(home, { recursive: true, force: true })
 })
 
 function response() {
