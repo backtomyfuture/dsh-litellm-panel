@@ -1,13 +1,17 @@
 {
-  "name": "dsh-resource-center",
+  "name": "dsh-litellm-panel",
   "version": "0.1.0",
-  "description": "DeepSeek Harness sidebar for LiteLLM models, MCP servers, skills, and spend.",
+  "description": "DeepSeek Harness sidebar panel for LiteLLM models, MCP servers, skills, and spend.",
   "license": "MIT",
   "author": "backtomyfuture",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/backtomyfuture/dsh-resource-center.git"
+    "url": "git+https://github.com/backtomyfuture/dsh-litellm-panel.git"
   },
+  "bugs": {
+    "url": "https://github.com/backtomyfuture/dsh-litellm-panel/issues"
+  },
+  "homepage": "https://github.com/backtomyfuture/dsh-litellm-panel#readme",
   "type": "module",
   "engines": {
     "node": ">=20"

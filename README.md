@@ -1,11 +1,11 @@
-# dsh-resource-center
+# dsh-litellm-panel
 
 DeepSeek Harness 侧边栏里的资源与工具中心。网关、模型和技能原来要改 YAML，现在放在同一个页面：
 
 1. **LiteLLM**：这一页管整条链路是否生效。绿点表示网关接受了这把虚拟钥匙。打开「生效」会拉取这把钥匙能用的全部模型并写入对话。关掉会从对话里去掉 LiteLLM 这个供应商，已安装的 MCP 也会停掉。DSH 不接受一个没有模型的自定义供应商，所以关闭是删掉这一条。
 2. **模型**：勾选不会立刻改对话，要点「保存并写入 DSH」。一个都不选再保存，会去掉 LiteLLM 供应商。点「详情」查看上次同步到的属性，这些属性只读。上下文、最大输出、输入类型和思考等级只按 LiteLLM `model_info` 里已经设置的值写入，不按模型名补。
 3. **MCP**：打开页面就列出这把虚拟钥匙被授权的服务器。每行都有「未安装 / 已安装」开关。安装和卸载时页面上有进度。点「工具」只展示网关返回的工具，没有单独的工具开关。网关返回空列表时会说明，而不是一片空白。连接走网关转发，上游密钥留在 LiteLLM，这里不填。
-4. **Skill**：列出 LiteLLM 上的技能。安装开关把它放进 `~/.dsh/skills`，安装时有进度。已经在 `~/.agents/skills` 或其他本机目录里的同名技能标成「本机已有」，可以预览，不能从这里覆盖。还没落地的技能要安装之后才能预览。不从别的 Git 地址或 HTTP 地址挑选。
+4. **Skill**：列出 LiteLLM 上的技能。安装开关把它放进 `~/.dsh/skills`，安装时有进度。已经在 `~/.agents/skills` 或其他本机目录里的同名技能标成「本机已有」，可以预览，不能从这里覆盖。还没落地的技能要安装之后才能预览。安装只认网关技能列表里的来源：页面只传技能名，来源地址由插件向网关重新取，不接受页面或请求里带来的地址，也不能手动添加 MCP 服务器。
 
 **消耗** 选项卡读取 LiteLLM 里这把 Virtual Key 自己的 spend logs，按模型汇总请求数、Token 和美元。
 
@@ -28,7 +28,7 @@ DeepSeek Harness 侧边栏里的资源与工具中心。网关、模型和技能
 先完全退出 DeepSeek Harness，再装进 desktop profile：
 
 ```sh
-dsh plugin --profile desktop add dsh-resource-center
+dsh plugin --profile desktop add dsh-litellm-panel
 ```
 
 `dsh web` 把 `desktop` 换成 `web`。重新打开后，侧边栏出现「LiteLLM资源中心」。
@@ -43,7 +43,7 @@ DSH 没有面向新手的 MCP 管理页。MCP 服务器是 `dsh-mcp-client` 的�
 - MCP 热启停是把 `@deepseek-ai/dsh-mcp-client` 挂成子插件。插件目录解析不到这个包时，改从 DeepSeek Harness 的 `app.asar` 里加载。宿主里仍然没有时，配置会保存，运行状态是错误。
 - 工具列表来自网关的 `tools/list`。网关把上游失败收成空列表时，页面会说明原因，不提供单个工具的开关。
 - 只有 `~/.dsh/skills` 里的技能可以在页面上停用，做法是移到 `~/.dsh/resource-center/disabled-skills`。项目技能留在仓库里。
-- DSH 只扫描技能根的下一层。Hub 安装会把选中的技能摊平到 `~/.dsh/skills/<name>/SKILL.md`。
+- DSH 只扫描技能根的下一层。网关技能安装会将选中的技能放进 `~/.dsh/skills/<name>/SKILL.md`。
 - 会话痕迹来自 `llm/stream` 和 `tools/result`。金额仍以 LiteLLM 为准。花费选项卡可以停止采集。
 - 插件对照的是 DeepSeek Harness `0.2.1-rc.5` 的侧边栏槽 `sidebar.panellist` 和 `main`。DSH 还在开发预览，槽名以后可能变。
 
@@ -53,7 +53,7 @@ DSH 没有面向新手的 MCP 管理页。MCP 服务器是 `dsh-mcp-client` 的�
 npm test
 ```
 
-状态文件在 `$DSH_HOME/resource-center/state.json`。删掉这个目录会清空面板里保存的服务器、勾选和 Hub 记录，不会删除已经安装到 `~/.dsh/skills` 的技能。
+状态文件在 `$DSH_HOME/resource-center/state.json`。删掉这个目录会清空面板里保存的服务器、勾选和网关技能的安装记录，不会删除已经安装到 `~/.dsh/skills` 的技能。
 
 ## 许可
 

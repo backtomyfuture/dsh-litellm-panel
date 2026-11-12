@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { Readable } from 'node:stream'
 import test from 'node:test'
 import vm from 'node:vm'
@@ -25,24 +25,17 @@ import {
 import {
   createSupervisor,
   denyReason,
-  frame,
   loadMcpPlugin,
   mcpClientUrl,
   normalizeServer,
-  parseEnvLines,
   probeServer,
-  scrubbedEnv,
-  splitArgs,
-  takeFrames,
 } from '../lib/mcp.js'
 import { inject } from '../lib/index.js'
 import { handle } from '../lib/routes.js'
 import {
   assertCanInstall,
-  classifyHubUrl,
   dshSkillIssue,
   findGitRoot,
-  githubBlobToRaw,
   gitCloneArgs,
   installHttpSkill,
   listSkillDirs,
@@ -265,7 +258,8 @@ test('spend query is this key and covers the whole end day', async () => {
   })
   assert.equal(logs.length, 0)
   const parsed = new URL(seen)
-  assert.equal(parsed.searchParams.get('api_key'), 'sk-user')
+  assert.equal(parsed.searchParams.get('api_key'), createHash('sha256').update('sk-user').digest('hex'))
+  assert.equal(seen.includes('sk-user'), false)
   assert.equal(parsed.searchParams.get('start_date'), '2026-10-31')
   assert.equal(parsed.searchParams.get('end_date'), '2026-11-01')
   await assert.rejects(
@@ -282,26 +276,19 @@ test('tool guard only denies the named server tool', () => {
   assert.equal(denyReason([{ ...servers[0], enabled: false }], { name: 'mcp__web__search' }), undefined)
 })
 
-test('mcp config parsing keeps secrets on update', () => {
-  assert.deepEqual(splitArgs('npx -y "@scope/pkg"'), ['npx', '-y', '@scope/pkg'])
-  assert.throws(() => splitArgs('"open'), /引号/)
-  const first = normalizeServer({
-    serverName: 'docs',
-    transport: 'stdio',
-    command: 'npx',
-    args: '-y server',
-    envText: 'TOKEN=secret',
-  })
-  const second = normalizeServer({
-    serverName: 'docs',
-    transport: 'stdio',
-    command: 'npx',
-    args: '-y server',
-    envText: 'OTHER=1',
-  }, first)
-  assert.equal(second.env.TOKEN, 'secret')
-  assert.equal(second.env.OTHER, '1')
-  assert.deepEqual(parseEnvLines('TOKEN=\n'), { TOKEN: '' })
+test('gateway mcp entries keep headers and disabled tools on update', () => {
+  const first = normalizeServer({ serverName: 'docs', url: 'http://127.0.0.1:4000/docs/mcp', viaGateway: true })
+  assert.equal(first.transport, 'streamable-http')
+  assert.equal(first.viaGateway, true)
+  const second = normalizeServer(
+    { serverName: 'docs', url: 'http://127.0.0.1:4000/docs/mcp', enabled: false },
+    { ...first, headers: { Authorization: 'Bearer kept' }, disabledTools: ['search'] },
+  )
+  assert.equal(second.headers.Authorization, 'Bearer kept')
+  assert.deepEqual(second.disabledTools, ['search'])
+  assert.equal(second.enabled, false)
+  assert.throws(() => normalizeServer({ serverName: 'docs', url: 'file:///tmp/x' }), /http/)
+  assert.equal(normalizeState({ mcpServers: [{ serverName: 'old', transport: 'stdio', command: 'npx' }, first] }).mcpServers.length, 1)
 })
 
 test('mcp client falls back to the copy inside app.asar', async () => {
@@ -331,16 +318,17 @@ test('supervisor restarts on config change and stops when disabled', async () =>
   const stopped = []
   const supervisor = createSupervisor({
     async start(config) {
-      started.push(config.serverName + ':' + config.command)
+      started.push(config.serverName + ':' + config.url)
       return { dispose() { stopped.push(config.serverName) } }
     },
   })
-  const server = normalizeServer({ serverName: 'docs', transport: 'stdio', command: 'a', args: '' })
+  const server = normalizeServer({ serverName: 'docs', url: 'http://127.0.0.1:4000/a/mcp' })
   await supervisor.reconcile([server])
   await supervisor.reconcile([server])
-  await supervisor.reconcile([{ ...server, command: 'b' }])
-  await supervisor.reconcile([{ ...server, command: 'b', enabled: false }])
-  assert.deepEqual(started, ['docs:a', 'docs:b'])
+  const moved = { ...server, url: 'http://127.0.0.1:4000/b/mcp' }
+  await supervisor.reconcile([moved])
+  await supervisor.reconcile([{ ...moved, enabled: false }])
+  assert.deepEqual(started, ['docs:http://127.0.0.1:4000/a/mcp', 'docs:http://127.0.0.1:4000/b/mcp'])
   assert.deepEqual(stopped, ['docs', 'docs'])
 })
 
@@ -377,49 +365,6 @@ test('http probe reads tools from a streamable endpoint', async () => {
   assert.match(empty.notice, /没有返回工具/)
 })
 
-test('stdio probe frames a tool list', async () => {
-  const server = normalizeServer({ serverName: 'local', transport: 'stdio', command: 'noop', args: '' })
-  const result = await probeServer(server, {
-    spawnImpl() {
-      const stdout = new EventEmitter()
-      const child = new EventEmitter()
-      child.stdout = stdout
-      child.stderr = new EventEmitter()
-      child.kill = () => {}
-      child.stdin = {
-        writes: 0,
-        write(chunk) {
-          this.writes += 1
-          if (this.writes === 3) {
-            const body = { jsonrpc: '2.0', id: 2, result: { tools: [{ name: 'echo', description: 'Echo' }] } }
-            stdout.emit('data', frame(body))
-          }
-          return true
-        },
-      }
-      return child
-    },
-  })
-  assert.equal(result.tools[0].name, 'echo')
-  const chunks = []
-  takeFrames(Buffer.concat([frame({ id: 1 }), Buffer.from('{"id":2}\n')]), message => chunks.push(message.id))
-  assert.deepEqual(chunks, [1, 2])
-})
-
-test('probe env drops ambient secrets but keeps explicit ones', () => {
-  const previous = process.env.LITELLM_MASTER_KEY
-  process.env.LITELLM_MASTER_KEY = 'sk-hidden'
-  try {
-    const env = scrubbedEnv({ TOKEN: 'keep' })
-    assert.equal(env.LITELLM_MASTER_KEY, undefined)
-    assert.equal(env.TOKEN, 'keep')
-    assert.equal(env.PATH, process.env.PATH)
-  } finally {
-    if (previous === undefined) delete process.env.LITELLM_MASTER_KEY
-    else process.env.LITELLM_MASTER_KEY = previous
-  }
-})
-
 test('skills scan, preview source, and user toggle', async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'dsh-home-'))
   const project = await mkdtemp(path.join(tmpdir(), 'dsh-proj-'))
@@ -443,17 +388,12 @@ test('skills scan, preview source, and user toggle', async () => {
   await rm(project, { recursive: true, force: true })
 })
 
-test('frontmatter, hub urls, and http install', async () => {
+test('frontmatter, git listing, and http install', async () => {
   const parsed = parseFrontmatter('---\ndescription: >\n  一行\n  两行\n---\n\n提示\n')
   assert.equal(parsed.data.description, '一行 两行')
   assert.match(parsed.body, /提示/)
-  assert.equal(
-    githubBlobToRaw('https://github.com/acme/skills/blob/main/demo/SKILL.md'),
-    'https://raw.githubusercontent.com/acme/skills/main/demo/SKILL.md',
-  )
-  assert.equal(classifyHubUrl('https://github.com/acme/skills').kind, 'git')
-  assert.equal(classifyHubUrl('https://example.com/SKILL.md').kind, 'http')
   assert.deepEqual(gitCloneArgs('https://github.com/acme/skills.git', '/tmp/repo').slice(0, 4), ['clone', '--depth', '1', '--'])
+  assert.throws(() => gitCloneArgs('file:///etc', '/tmp/repo'), /Git 地址/)
 
   const home = await mkdtemp(path.join(tmpdir(), 'dsh-hub-'))
   const repo = await mkdtemp(path.join(tmpdir(), 'dsh-repo-'))
@@ -461,10 +401,10 @@ test('frontmatter, hub urls, and http install', async () => {
   await writeFile(path.join(repo, 'demo', 'SKILL.md'), '---\ndescription: 远程\n---\n\nhello\n')
   const found = await listSkillDirs(repo)
   assert.equal(found[0].name, 'demo')
-  await installHttpSkill({ home }, {
-    name: 'remote-skill',
-    url: 'https://example.com/SKILL.md',
-    body: '---\nname: remote-skill\ndescription: 远程\n---\n\n正文\n',
+  await installHttpSkill({ home }, { name: 'remote-skill', url: 'https://example.com/SKILL.md' }, async (url, init) => {
+    assert.equal(url, 'https://example.com/SKILL.md')
+    assert.ok(init.signal)
+    return jsonResponse(200, '---\nname: remote-skill\ndescription: 远程\n---\n\n正文\n')
   })
   const text = await readFile(path.join(home, 'skills', 'remote-skill', 'SKILL.md'), 'utf8')
   assert.match(text, /正文/)
@@ -488,19 +428,9 @@ test('state file omits the key and the route is loopback only', async () => {
   assert.equal(env.LITELLM_MASTER_KEY, undefined)
 
   const forbidden = response()
-  await handle(request({ method: 'GET', url: '/resource-center?op=state', address: '8.8.8.8' }), forbidden, { store })
+  await handle(request({ method: 'GET', url: '/litellm-panel?op=state', address: '8.8.8.8' }), forbidden, { store })
   assert.equal(forbidden.status, 403)
 
-  const saved = response()
-  await handle(request({
-    method: 'POST',
-    url: '/resource-center',
-    body: { op: 'mcp.save', serverName: 'docs', transport: 'stdio', command: 'npx', args: '-y server' },
-  }), saved, { store, supervisor: { async reconcile() {} } })
-  assert.equal(saved.status, 200)
-  const body = JSON.parse(saved.body)
-  assert.equal(body.server.serverName, 'docs')
-  assert.equal(body.server.envKeys.length, 0)
   await rm(home, { recursive: true, force: true })
 })
 
@@ -518,7 +448,7 @@ test('sync stores the typed key and a rejected key is explained', async () => {
   const synced = response()
   await handle(request({
     method: 'POST',
-    url: '/resource-center',
+    url: '/litellm-panel',
     body: { op: 'litellm.sync', baseUrl: 'http://127.0.0.1:4000/', apiKey: 'sk-typed' },
   }), synced, { store, fetch: fetchImpl })
   assert.equal(synced.status, 200)
@@ -531,7 +461,7 @@ test('sync stores the typed key and a rejected key is explained', async () => {
   const notedResponse = response()
   await handle(request({
     method: 'POST',
-    url: '/resource-center',
+    url: '/litellm-panel',
     body: { op: 'litellm.key', apiKey: 'sk-noted' },
   }), notedResponse, {
     store: notedStore,
@@ -549,7 +479,7 @@ test('sync stores the typed key and a rejected key is explained', async () => {
   const empty = createStore(emptyHome)
   await handle(request({
     method: 'POST',
-    url: '/resource-center',
+    url: '/litellm-panel',
     body: { op: 'litellm.sync', baseUrl: 'http://127.0.0.1:4000' },
   }), missing, { store: empty, fetch: fetchImpl })
   assert.equal(missing.status, 400)
@@ -587,7 +517,7 @@ test('gateway mcp and skill lists drop secrets', async () => {
   const pulled = response()
   await handle(request({
     method: 'POST',
-    url: '/resource-center',
+    url: '/litellm-panel',
     body: { op: 'mcp.pull' },
   }), pulled, {
     store,
@@ -602,23 +532,88 @@ test('gateway mcp and skill lists drop secrets', async () => {
   assert.equal(listed.viaGateway, true)
   assert.equal(listed.url, 'http://127.0.0.1:4000/deepwiki/mcp')
   assert.equal(JSON.stringify(listed).includes('mcp.deepwiki.com'), false)
+  const gatewayFetch = async () => jsonResponse(200, [{ server_name: 'deepwiki', transport: 'http', url: 'https://mcp.deepwiki.com/mcp', auth_type: 'none' }])
   const adopted = response()
   await handle(request({
     method: 'POST',
-    url: '/resource-center',
-    body: {
-      op: 'mcp.save',
-      serverName: 'deepwiki',
-      transport: 'streamable-http',
-      url: listed.url,
-      viaGateway: true,
-    },
-  }), adopted, { store, supervisor: { async reconcile() {} } })
+    url: '/litellm-panel',
+    body: { op: 'mcp.save', serverName: 'deepwiki', url: 'https://evil.example/mcp', transport: 'stdio', command: 'rm' },
+  }), adopted, { store, fetch: gatewayFetch, supervisor: { async reconcile() {} } })
   assert.equal(adopted.status, 200)
   assert.equal(JSON.stringify(JSON.parse(adopted.body)).includes('sk-saved'), false)
   const stored = await store.read()
   assert.equal(stored.mcpServers[0].viaGateway, true)
+  assert.equal(stored.mcpServers[0].url, 'http://127.0.0.1:4000/deepwiki/mcp')
+  assert.equal(stored.mcpServers[0].command, undefined)
   assert.equal(stored.mcpServers[0].headers.Authorization, 'Bearer sk-saved')
+  const unknown = response()
+  await handle(request({
+    method: 'POST',
+    url: '/litellm-panel',
+    body: { op: 'mcp.save', serverName: 'not-offered', url: 'https://evil.example/mcp' },
+  }), unknown, { store, fetch: gatewayFetch, supervisor: { async reconcile() {} } })
+  assert.equal(unknown.status, 404)
+  assert.equal((await store.read()).mcpServers.length, 1)
+  await rm(home, { recursive: true, force: true })
+})
+
+test('skills install only from the gateway list, never from the request', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'dsh-install-'))
+  const store = createStore(home)
+  await store.writeKey('sk-saved')
+  const fetched = []
+  const fetchImpl = async (url) => {
+    fetched.push(String(url))
+    if (String(url).endsWith('/claude-code/plugins')) {
+      return jsonResponse(200, { plugins: [{ name: 'offered', description: 'd', source: { source: 'url', url: 'https://skills.example/offered/SKILL.md' } }] })
+    }
+    return jsonResponse(200, '---\nname: offered\ndescription: d\n---\n\n正文\n')
+  }
+  const deps = { store, home, projectRoot: home, agentsHome: path.join(home, 'no-agents'), fetch: fetchImpl }
+  const installed = response()
+  await handle(request({
+    method: 'POST',
+    url: '/litellm-panel',
+    body: { op: 'hub.install', names: ['offered'], url: 'https://evil.example/SKILL.md', kind: 'http' },
+  }), installed, deps)
+  assert.equal(installed.status, 200)
+  assert.deepEqual(fetched.filter(url => !url.endsWith('/claude-code/plugins')), ['https://skills.example/offered/SKILL.md'])
+  assert.equal(fetched.some(url => url.includes('evil.example')), false)
+  assert.match(await readFile(path.join(home, 'skills', 'offered', 'SKILL.md'), 'utf8'), /正文/)
+  assert.equal((await store.read()).hub[0].url, 'https://skills.example/offered/SKILL.md')
+  const missing = response()
+  await handle(request({
+    method: 'POST',
+    url: '/litellm-panel',
+    body: { op: 'hub.install', names: ['other'], url: 'https://evil.example/SKILL.md' },
+  }), missing, deps)
+  assert.equal(missing.status, 404)
+  assert.equal((await store.read()).hub.length, 1)
+  await rm(home, { recursive: true, force: true })
+})
+
+test('gateway calls carry a deadline', async () => {
+  const signals = []
+  const fetchImpl = async (url, init) => {
+    signals.push(init.signal)
+    return String(url).endsWith('/model/info') ? jsonResponse(404, {}) : jsonResponse(200, { data: [{ id: 'm' }] })
+  }
+  await fetchCatalog('http://127.0.0.1:4000', 'sk-test', fetchImpl)
+  assert.equal(signals.length, 2)
+  assert.ok(signals.every(signal => signal instanceof AbortSignal))
+})
+
+test('trace log is read from its tail and trimmed when it grows', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'dsh-trace-'))
+  const store = createStore(home)
+  const filler = 'x'.repeat(100 * 1024)
+  for (let id = 0; id < 50; id += 1) await store.appendTrace({ id, filler })
+  assert.ok((await stat(store.traceFile)).size < 4 * 1024 * 1024)
+  const traces = await store.readTraces()
+  assert.equal(traces.at(-1).id, 49)
+  assert.ok(traces.length >= 5)
+  assert.deepEqual(traces.map(row => row.id), [...traces.map(row => row.id)].sort((a, b) => a - b))
+  assert.equal((await store.readTraces(2)).map(row => row.id).join(), '48,49')
   await rm(home, { recursive: true, force: true })
 })
 
@@ -661,7 +656,7 @@ test('client registers the sidebar page', () => {
   }
   const code = readFileSync(path.join(root, 'lib', 'client.js'), 'utf8')
   vm.runInNewContext(code, sandbox, { filename: 'client.js' })
-  assert.deepEqual(registered.map(spec => spec.key || spec.id), ['resource-center', 'resource-center'])
+  assert.deepEqual(registered.map(spec => spec.key || spec.id), ['litellm-panel', 'litellm-panel'])
   assert.equal(registered[1].label, 'LiteLLM资源中心')
   assert.equal(code.includes('添加 MCP Server'), false)
   assert.equal(code.includes('Git 仓库'), false)
@@ -734,7 +729,7 @@ test('turning the gateway off keeps selections and stops models and mcp', async 
   const off = response()
   await handle(request({
     method: 'POST',
-    url: '/resource-center',
+    url: '/litellm-panel',
     body: { op: 'litellm.enabled', enabled: false },
   }), off, { store, editor, supervisor })
   assert.equal(off.status, 200)
@@ -747,7 +742,7 @@ test('turning the gateway off keeps selections and stops models and mcp', async 
   assert.equal((await store.read()).mcpServers[0].serverName, 'deepwiki')
   const quiet = response()
   let probed = false
-  await handle(request({ method: 'GET', url: '/resource-center?op=litellm.ping' }), quiet, {
+  await handle(request({ method: 'GET', url: '/litellm-panel?op=litellm.ping' }), quiet, {
     store,
     fetch: async () => {
       probed = true
@@ -761,7 +756,7 @@ test('turning the gateway off keeps selections and stops models and mcp', async 
   const saved = response()
   await handle(request({
     method: 'POST',
-    url: '/resource-center',
+    url: '/litellm-panel',
     body: { op: 'litellm.save', providerId: 'litellm', modelIds: ['deepseek-v4.1-flash'], apply: true },
   }), saved, { store, editor, supervisor })
   assert.equal(saved.status, 200)
@@ -771,7 +766,7 @@ test('turning the gateway off keeps selections and stops models and mcp', async 
   const on = response()
   await handle(request({
     method: 'POST',
-    url: '/resource-center',
+    url: '/litellm-panel',
     body: { op: 'litellm.enabled', enabled: true },
   }), on, {
     store,
@@ -791,7 +786,7 @@ test('turning the gateway off keeps selections and stops models and mcp', async 
   const narrowed = response()
   await handle(request({
     method: 'POST',
-    url: '/resource-center',
+    url: '/litellm-panel',
     body: { op: 'litellm.save', providerId: 'litellm', modelIds: ['glm-5.3-flash'], apply: true },
   }), narrowed, { store, editor, supervisor })
   assert.equal(narrowed.status, 200)
@@ -799,21 +794,21 @@ test('turning the gateway off keeps selections and stops models and mcp', async 
   const cleared = response()
   await handle(request({
     method: 'POST',
-    url: '/resource-center',
+    url: '/litellm-panel',
     body: { op: 'litellm.save', providerId: 'litellm', modelIds: [], apply: true },
   }), cleared, { store, editor, supervisor })
   assert.equal(cleared.status, 200)
   assert.equal(edits.at(-1).providers.litellm, undefined)
 
   const up = response()
-  await handle(request({ method: 'GET', url: '/resource-center?op=litellm.ping' }), up, {
+  await handle(request({ method: 'GET', url: '/litellm-panel?op=litellm.ping' }), up, {
     store,
     fetch: async () => jsonResponse(200, { data: [] }),
   })
   assert.equal(JSON.parse(up.body).status, 'on')
   assert.equal(JSON.stringify(JSON.parse(up.body)).includes('sk-saved'), false)
   const down = response()
-  await handle(request({ method: 'GET', url: '/resource-center?op=litellm.ping' }), down, {
+  await handle(request({ method: 'GET', url: '/litellm-panel?op=litellm.ping' }), down, {
     store,
     fetch: async () => jsonResponse(401, { error: 'no' }),
   })
