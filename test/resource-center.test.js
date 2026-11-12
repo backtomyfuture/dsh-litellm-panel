@@ -42,6 +42,7 @@ import {
   listSkillDirs,
   parseFrontmatter,
   scanSkills,
+  setHubSkillsActive,
   setSkillEnabled,
 } from '../lib/skills.js'
 import { attributeSpend, observeModelCall, skillNameFromArgs } from '../lib/spend.js'
@@ -389,6 +390,48 @@ test('skills scan, preview source, and user toggle', async () => {
   await rm(project, { recursive: true, force: true })
 })
 
+test('gateway switch parks and restores only hub skills', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'dsh-park-'))
+  const user = path.join(home, 'skills')
+  const parked = path.join(home, 'resource-center', 'disabled-skills')
+  await mkdir(path.join(user, 'hub-skill'), { recursive: true })
+  await writeFile(path.join(user, 'hub-skill', 'SKILL.md'), '---\nname: hub-skill\ndescription: 正在使用\n---\n')
+  await writeFile(path.join(user, 'plain.md'), '---\nname: plain\ndescription: 文件\n---\n')
+  await mkdir(path.join(user, 'local-skill'), { recursive: true })
+  await writeFile(path.join(user, 'local-skill', 'SKILL.md'), '---\nname: local-skill\ndescription: 本机\n---\n')
+  await mkdir(path.join(parked, 'hub-skill'), { recursive: true })
+  await writeFile(path.join(parked, 'hub-skill', 'SKILL.md'), '---\nname: hub-skill\ndescription: 旧副本\n---\n')
+  await mkdir(path.join(parked, 'kept'), { recursive: true })
+  await writeFile(path.join(parked, 'kept', 'SKILL.md'), '---\nname: kept\ndescription: 非网关\n---\n')
+  const hub = [
+    { name: 'hub-skill' },
+    { name: 'plain' },
+    { name: 'plain' },
+    { name: 'missing-skill' },
+    { name: '../nope' },
+    { name: '' },
+  ]
+  await setHubSkillsActive({ home }, hub, false)
+  assert.match(await readFile(path.join(parked, 'hub-skill', 'SKILL.md'), 'utf8'), /正在使用/)
+  assert.match(await readFile(path.join(parked, 'plain.md'), 'utf8'), /文件/)
+  await assert.rejects(stat(path.join(user, 'hub-skill')))
+  await assert.rejects(stat(path.join(user, 'plain.md')))
+  assert.match(await readFile(path.join(user, 'local-skill', 'SKILL.md'), 'utf8'), /本机/)
+  assert.match(await readFile(path.join(parked, 'kept', 'SKILL.md'), 'utf8'), /非网关/)
+
+  await mkdir(path.join(user, 'hub-skill'), { recursive: true })
+  await writeFile(path.join(user, 'hub-skill', 'SKILL.md'), '---\nname: hub-skill\ndescription: 已在使用\n---\n')
+  await setHubSkillsActive({ home }, hub, true)
+  assert.match(await readFile(path.join(user, 'hub-skill', 'SKILL.md'), 'utf8'), /已在使用/)
+  assert.match(await readFile(path.join(parked, 'hub-skill', 'SKILL.md'), 'utf8'), /正在使用/)
+  assert.match(await readFile(path.join(user, 'plain.md'), 'utf8'), /文件/)
+  await assert.rejects(stat(path.join(parked, 'plain.md')))
+  assert.match(await readFile(path.join(user, 'local-skill', 'SKILL.md'), 'utf8'), /本机/)
+  assert.match(await readFile(path.join(parked, 'kept', 'SKILL.md'), 'utf8'), /非网关/)
+  await setHubSkillsActive({ home: path.join(home, 'missing') }, [], true)
+  await rm(home, { recursive: true, force: true })
+})
+
 test('frontmatter, git listing, and http install', async () => {
   const parsed = parseFrontmatter('---\ndescription: >\n  一行\n  两行\n---\n\n提示\n')
   assert.equal(parsed.data.description, '一行 两行')
@@ -685,6 +728,8 @@ test('client registers the sidebar page', () => {
   assert.equal(code.includes('详情'), true)
   assert.equal(code.includes('这里不提供修改'), true)
   assert.equal(code.includes('本机已有'), true)
+  assert.equal(code.includes("tab === 'models' || tab === 'mcp' || tab === 'skills'"), true)
+  assert.equal(code.includes('从这里安装的技能也已移出'), true)
   assert.equal(code.includes('~/.agents/skills'), true)
   assert.equal(code.includes('正在'), true)
 })
@@ -825,6 +870,67 @@ test('turning the gateway off keeps selections and stops models and mcp', async 
   assert.equal(JSON.parse(down.body).status, 'down')
   assert.match(JSON.parse(down.body).message, /HTTP 401/)
   assert.equal(JSON.parse(down.body).message.includes('sk-saved'), false)
+  await rm(home, { recursive: true, force: true })
+  if (previousKey === undefined) delete process.env.DSH_LITELLM_KEY
+  else process.env.DSH_LITELLM_KEY = previousKey
+})
+
+test('turning the gateway off parks hub skills and turning it on restores them', async () => {
+  const previousKey = process.env.DSH_LITELLM_KEY
+  delete process.env.DSH_LITELLM_KEY
+  const home = await mkdtemp(path.join(tmpdir(), 'dsh-gate-skill-'))
+  const store = createStore(home)
+  await store.writeKey('sk-saved')
+  await mkdir(path.join(home, 'skills', 'hub-skill'), { recursive: true })
+  await writeFile(path.join(home, 'skills', 'hub-skill', 'SKILL.md'), '---\nname: hub-skill\ndescription: 网关技能\n---\n')
+  await mkdir(path.join(home, 'skills', 'local-skill'), { recursive: true })
+  await writeFile(path.join(home, 'skills', 'local-skill', 'SKILL.md'), '---\nname: local-skill\ndescription: 本机\n---\n')
+  await store.update(current => ({
+    ...current,
+    hub: [{ name: 'hub-skill', url: 'https://example.com/hub-skill/SKILL.md', kind: 'http', relative: '.' }],
+    litellm: {
+      ...current.litellm,
+      catalog: [{ id: 'deepseek-v4.1-flash' }],
+      enabledModelIds: ['deepseek-v4.1-flash'],
+    },
+  }))
+  const deps = {
+    store,
+    home,
+    projectRoot: home,
+    agentsHome: path.join(home, 'no-agents'),
+    editor: {
+      entries: () => [{ options: { id: 'llm-pi-ai' } }],
+      async edit(_entry, change) { change({}, {}) },
+    },
+    supervisor: { async reconcile() {} },
+    fetch: async (url) => (
+      String(url).endsWith('/model/info')
+        ? jsonResponse(404, {})
+        : jsonResponse(200, { data: [{ id: 'deepseek-v4.1-flash' }] })
+    ),
+  }
+  const off = response()
+  await handle(request({
+    method: 'POST',
+    url: '/litellm-panel',
+    body: { op: 'litellm.enabled', enabled: false },
+  }), off, deps)
+  assert.equal(off.status, 200)
+  await assert.rejects(stat(path.join(home, 'skills', 'hub-skill')))
+  assert.match(await readFile(path.join(home, 'resource-center', 'disabled-skills', 'hub-skill', 'SKILL.md'), 'utf8'), /网关技能/)
+  assert.match(await readFile(path.join(home, 'skills', 'local-skill', 'SKILL.md'), 'utf8'), /本机/)
+  assert.equal((await store.read()).hub[0].name, 'hub-skill')
+  const on = response()
+  await handle(request({
+    method: 'POST',
+    url: '/litellm-panel',
+    body: { op: 'litellm.enabled', enabled: true },
+  }), on, deps)
+  assert.equal(on.status, 200)
+  assert.match(await readFile(path.join(home, 'skills', 'hub-skill', 'SKILL.md'), 'utf8'), /网关技能/)
+  await assert.rejects(stat(path.join(home, 'resource-center', 'disabled-skills', 'hub-skill')))
+  assert.match(await readFile(path.join(home, 'skills', 'local-skill', 'SKILL.md'), 'utf8'), /本机/)
   await rm(home, { recursive: true, force: true })
   if (previousKey === undefined) delete process.env.DSH_LITELLM_KEY
   else process.env.DSH_LITELLM_KEY = previousKey
