@@ -1,6 +1,6 @@
 {
   "name": "dsh-litellm-panel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DeepSeek Harness sidebar panel for LiteLLM models, MCP servers, skills, and spend.",
   "license": "MIT",
   "author": "backtomyfuture",
@@ -45,13 +45,18 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "node --check lib/index.js && node --check lib/client.js && node --check lib/routes.js && node --check lib/store.js && node --check lib/litellm.js && node --check lib/mcp.js && node --check lib/skills.js && node --check lib/spend.js && node --check lib/loopback.js",
-    "test": "npm run check && node --test"
+    "lint": "eslint .",
+    "test": "npm run lint && node --test"
   },
   "keywords": [
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
     "litellm"
-  ]
+  ],
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.14.0",
+    "globals": "^17.14.0"
+  }
 }
