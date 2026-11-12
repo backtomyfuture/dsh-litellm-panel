@@ -37,6 +37,19 @@ dsh plugin --profile desktop add dsh-litellm-panel
 
 DSH 没有面向新手的 MCP 管理页。MCP 服务器是 `dsh-mcp-client` 的配置条目。这个插件只安装 LiteLLM 分发下来的服务器。
 
+## 从 dsh-resource-center 迁移
+
+旧包名是 `dsh-resource-center`，新包名是 `dsh-litellm-panel`。两个不能同时装，先移除旧的再装新的：
+
+```sh
+dsh plugin --profile desktop remove dsh-resource-center
+dsh plugin --profile desktop add dsh-litellm-panel
+```
+
+钥匙和勾选保存在 `$DSH_HOME/resource-center`，迁移后原样保留。
+
+0.2.0 删除了两个功能：手输 Git/HTTP 地址安装技能、手动添加 MCP。技能和 MCP 的来源现在只由 LiteLLM 网关提供。旧状态里的 stdio MCP 服务器会被忽略。
+
 ## 边界
 
 - 模型写入走宿主的 `configEditor`。DSH 的编辑器会把 `llm-pi-ai` 的当前配置整段钉在 profile 层。找不到这条或没有编辑器时，页面给出可以贴进 `cordis.patch.yml` 的片段。
