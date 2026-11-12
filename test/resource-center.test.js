@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto'
 import { Readable } from 'node:stream'
 import test from 'node:test'
 import vm from 'node:vm'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   fetchCatalog,
   fetchSpend,
@@ -32,6 +32,7 @@ import {
 } from '../lib/mcp.js'
 import { inject } from '../lib/index.js'
 import { handle } from '../lib/routes.js'
+import { applyUpdate, compareVersions, findProfile, releaseStatus } from '../lib/release.js'
 import {
   assertCanInstall,
   dshSkillIssue,
@@ -669,6 +670,9 @@ test('client registers the sidebar page', () => {
   assert.equal(code.includes('已启动'), false)
   assert.equal(code.includes('重新连接'), true)
   assert.equal(code.includes('百万'), true)
+  assert.equal(code.includes('plugin.version'), true)
+  assert.equal(code.includes('已是最新'), true)
+  assert.equal(code.includes("join('、')"), true)
   assert.equal(code.includes('setUTCMonth'), true)
   assert.equal(code.includes('这里不填'), true)
   assert.equal(code.includes('Sync Models'), false)
@@ -844,6 +848,65 @@ function jsonResponse(status, body, headers = {}) {
     text: async () => text,
   }
 }
+
+test('release status compares npm and only updates an installed profile', async () => {
+  assert.equal(compareVersions('0.2.1', '0.2.0'), 1)
+  assert.equal(compareVersions('0.2.0', '0.2.1'), -1)
+  assert.equal(compareVersions('0.2.10', '0.2.9'), 1)
+  assert.equal(compareVersions('0.2.1', '0.2.1'), 0)
+  assert.equal(compareVersions('0.2.1', 'nope'), null)
+  const installed = pathToFileURL(path.resolve('/tmp/profiles/desktop/node_modules/.pnpm/pkg/node_modules/dsh-litellm-panel/lib/release.js'))
+  assert.equal(findProfile(installed).name, 'desktop')
+  assert.equal(findProfile(pathToFileURL(path.resolve('/tmp/checkout/dsh-resource-center/lib/release.js'))), null)
+
+  const fetch = async () => jsonResponse(200, { version: '0.9.0' })
+  const dev = await releaseStatus({ current: '0.2.1', fetch, moduleUrl: pathToFileURL(path.resolve('/tmp/checkout/lib/release.js')) })
+  assert.equal(dev.updateAvailable, true)
+  assert.equal(dev.canUpdate, false)
+  const ready = await releaseStatus({ current: '0.2.1', fetch, moduleUrl: installed })
+  assert.equal(ready.canUpdate, true)
+  assert.equal(ready.profile, 'desktop')
+  const same = await releaseStatus({ current: '0.9.0', fetch, moduleUrl: installed })
+  assert.equal(same.updateAvailable, false)
+
+  const calls = []
+  const updated = await applyUpdate({
+    current: '0.2.1',
+    fetch,
+    moduleUrl: installed,
+    spawn(profile, version) { calls.push([profile.name, profile.dir, version]) },
+  })
+  assert.equal(updated.installed, '0.9.0')
+  assert.equal(updated.restart, true)
+  assert.equal(calls[0][0], 'desktop')
+  assert.equal(calls[0][2], '0.9.0')
+  await assert.rejects(applyUpdate({
+    current: '0.9.0',
+    fetch,
+    moduleUrl: installed,
+    spawn() { throw new Error('should not install') },
+  }), /已经是最新版本/)
+
+  const listed = response()
+  await handle(request({ method: 'GET', url: '/litellm-panel?op=plugin.version' }), listed, {
+    fetch,
+    packageVersion: '0.2.1',
+    moduleUrl: installed,
+  })
+  assert.equal(listed.status, 200)
+  assert.equal(JSON.parse(listed.body).canUpdate, true)
+  const ran = []
+  const posted = response()
+  await handle(request({ method: 'POST', url: '/litellm-panel', body: { op: 'plugin.update' } }), posted, {
+    fetch,
+    packageVersion: '0.2.1',
+    moduleUrl: installed,
+    spawnUpdate(profile, version) { ran.push(`${profile.name}@${version}`) },
+  })
+  assert.equal(posted.status, 200)
+  assert.deepEqual(ran, ['desktop@0.9.0'])
+  assert.equal(JSON.parse(posted.body).installed, '0.9.0')
+})
 
 function response() {
   return {
