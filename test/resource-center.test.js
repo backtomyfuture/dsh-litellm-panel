@@ -736,6 +736,55 @@ test('client registers the sidebar page', () => {
   assert.equal(code.includes('正在'), true)
 })
 
+test('opening the panel fills model info missing from the saved catalog', async () => {
+  const previousKey = process.env.DSH_LITELLM_KEY
+  delete process.env.DSH_LITELLM_KEY
+  const home = await mkdtemp(path.join(tmpdir(), 'dsh-info-'))
+  const store = createStore(home)
+  await store.writeKey('sk-saved')
+  await store.update(current => ({
+    ...current,
+    litellm: {
+      ...current.litellm,
+      baseUrl: 'http://127.0.0.1:4000',
+      catalog: [{ id: 'qwen3.8-flash-next' }],
+    },
+  }))
+  let calls = 0
+  const fetchImpl = async (url) => {
+    calls += 1
+    if (String(url).endsWith('/model/info')) {
+      return jsonResponse(200, { data: [{
+        model_name: 'qwen3.8-flash-next',
+        model_info: {
+          id: '3fb86ef9-be1e-4563-9f9c-db528770f415',
+          max_input_tokens: 131072,
+          max_output_tokens: 32768,
+          supports_vision: true,
+          supports_reasoning: false,
+        },
+      }] })
+    }
+    return jsonResponse(200, { data: [{ id: 'qwen3.8-flash-next' }] })
+  }
+  const deps = { store, fetch: fetchImpl, home, projectRoot: home, agentsHome: path.join(home, 'no-agents') }
+  const first = response()
+  await handle(request({ method: 'GET', url: '/litellm-panel?op=state' }), first, deps)
+  assert.equal(first.status, 200)
+  const model = JSON.parse(first.body).litellm.catalog[0]
+  assert.equal(model.contextWindow, 131072)
+  assert.equal(model.maxTokens, 32768)
+  assert.deepEqual(model.input, ['text', 'image'])
+  assert.equal(model.reasoningEfforts, false)
+  const seen = calls
+  const second = response()
+  await handle(request({ method: 'GET', url: '/litellm-panel?op=state' }), second, deps)
+  assert.equal(calls, seen)
+  await rm(home, { recursive: true, force: true })
+  if (previousKey === undefined) delete process.env.DSH_LITELLM_KEY
+  else process.env.DSH_LITELLM_KEY = previousKey
+})
+
 test('a missing gateway switch stays on and keeps a stored input list', () => {
   const next = normalizeState({
     litellm: {
